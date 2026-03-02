@@ -5,12 +5,13 @@ use std::path::Path;
 use crate::blockchain::error::BlockchainError;
 use crate::blockchain::mempool::Mempool;
 use crate::blockchain::reorg::{
-    common_ancestor_height, cumulative_work, ForkRecord, ForkStatus, ForkTracker, ReorgDecision,
+    common_ancestor_height_by_hashes, cumulative_work, cumulative_work_iter, ForkRecord,
+    ForkStatus, ForkTracker, ReorgDecision,
 };
 use crate::blockchain::state::{genesis_ledger, GenesisAccount, LedgerState};
 use crate::blockchain::validator::{
     validate_and_apply_block_transactions, validate_block_header, validate_candidate_transactions,
-    validate_chain,
+    validate_chain, validate_chain_iter,
 };
 use crate::core::block::{Block, BlockHeader};
 use crate::core::hash::Hash32;
@@ -102,7 +103,7 @@ impl Blockchain {
     }
 
     pub fn cumulative_work(&self) -> u128 {
-        cumulative_work(&self.blocks())
+        cumulative_work_iter(self.chain.iter().map(|entry| &entry.block))
     }
 
     pub fn tracked_forks_count(&self) -> usize {
@@ -206,8 +207,11 @@ impl Blockchain {
     }
 
     pub fn validate_full_chain(&self) -> Result<(), BlockchainError> {
-        let blocks = self.blocks();
-        validate_chain(&blocks, &self.genesis_accounts, self.config.difficulty_bits)?;
+        validate_chain_iter(
+            self.chain.iter().map(|entry| &entry.block),
+            &self.genesis_accounts,
+            self.config.difficulty_bits,
+        )?;
         Ok(())
     }
 
@@ -219,8 +223,8 @@ impl Blockchain {
             return Err(BlockchainError::EmptyChain);
         }
 
-        let canonical_blocks = self.blocks();
-        let common_height = common_ancestor_height(&canonical_blocks, &candidate_blocks)
+        let canonical_hashes: Vec<Hash32> = self.chain.iter().map(|entry| entry.hash).collect();
+        let common_height = common_ancestor_height_by_hashes(&canonical_hashes, &candidate_blocks)
             .ok_or(BlockchainError::NoCommonAncestor)?;
 
         let candidate_tip = candidate_blocks
@@ -234,7 +238,7 @@ impl Blockchain {
             self.config.difficulty_bits,
         )?;
         let candidate_work = cumulative_work(&candidate_blocks);
-        let canonical_work = cumulative_work(&canonical_blocks);
+        let canonical_work = cumulative_work_iter(self.chain.iter().map(|entry| &entry.block));
 
         if candidate_work <= canonical_work {
             self.fork_tracker.record(ForkRecord {

@@ -1,18 +1,8 @@
-mod blockchain;
-mod cli;
-mod config;
-mod core;
-mod crypto;
-mod error;
-mod logging;
-mod network;
-mod rpc;
-mod storage;
-
 use clap::Parser;
-use cli::{Cli, Command};
-use config::Config;
-use error::AppError;
+use rustchain::cli::{self, Cli, Command};
+use rustchain::config::Config;
+use rustchain::error::AppError;
+use rustchain::logging;
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {

@@ -14,23 +14,28 @@ pub fn validate_chain(
     genesis_accounts: &[GenesisAccount],
     expected_difficulty_bits: u32,
 ) -> Result<LedgerState, BlockchainError> {
-    if blocks.is_empty() {
-        return Err(BlockchainError::EmptyChain);
-    }
+    validate_chain_iter(blocks.iter(), genesis_accounts, expected_difficulty_bits)
+}
 
-    validate_genesis_block(&blocks[0])?;
+pub fn validate_chain_iter<'a, I>(
+    blocks: I,
+    genesis_accounts: &[GenesisAccount],
+    expected_difficulty_bits: u32,
+) -> Result<LedgerState, BlockchainError>
+where
+    I: IntoIterator<Item = &'a Block>,
+{
+    let mut iter = blocks.into_iter();
+    let genesis = iter.next().ok_or(BlockchainError::EmptyChain)?;
+    validate_genesis_block(genesis)?;
 
     let mut ledger = genesis_ledger(genesis_accounts);
-    let mut previous_hash = blocks[0].hash();
+    let mut previous_hash = genesis.hash();
 
-    for (height, block) in blocks.iter().enumerate().skip(1) {
-        validate_block_header(
-            block,
-            height as u64,
-            &previous_hash,
-            expected_difficulty_bits,
-        )?;
-        validate_and_apply_block_transactions(block, height as u64, &mut ledger)?;
+    for (offset, block) in iter.enumerate() {
+        let height = (offset + 1) as u64;
+        validate_block_header(block, height, &previous_hash, expected_difficulty_bits)?;
+        validate_and_apply_block_transactions(block, height, &mut ledger)?;
         previous_hash = block.hash();
     }
 

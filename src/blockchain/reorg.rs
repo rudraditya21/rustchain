@@ -60,6 +60,13 @@ pub fn block_work(block: &Block) -> u128 {
 }
 
 pub fn cumulative_work(blocks: &[Block]) -> u128 {
+    cumulative_work_iter(blocks.iter())
+}
+
+pub fn cumulative_work_iter<'a, I>(blocks: I) -> u128
+where
+    I: IntoIterator<Item = &'a Block>,
+{
     let mut work = 0u128;
     for block in blocks {
         work = work.saturating_add(block_work(block));
@@ -72,6 +79,22 @@ pub fn common_ancestor_height(canonical: &[Block], candidate: &[Block]) -> Optio
     let mut common = None;
     for index in 0..limit {
         if canonical[index].hash() == candidate[index].hash() {
+            common = Some(index as u64);
+        } else {
+            break;
+        }
+    }
+    common
+}
+
+pub fn common_ancestor_height_by_hashes(
+    canonical_hashes: &[Hash32],
+    candidate: &[Block],
+) -> Option<u64> {
+    let limit = canonical_hashes.len().min(candidate.len());
+    let mut common = None;
+    for index in 0..limit {
+        if canonical_hashes[index] == candidate[index].hash() {
             common = Some(index as u64);
         } else {
             break;
