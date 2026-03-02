@@ -1,9 +1,5 @@
 #![allow(dead_code)]
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RpcMethod {
-    GetChain,
-    SendTransaction,
-    GetBalance,
-    MineBlock,
-}
+pub mod handlers;
+pub mod server;
+pub mod types;
