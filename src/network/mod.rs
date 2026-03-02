@@ -1,9 +1,5 @@
 #![allow(dead_code)]
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NetworkMessage {
-    NewBlock,
-    NewTransaction,
-    GetChain,
-    ChainResponse,
-}
+pub mod error;
+pub mod p2p;
+pub mod protocol;
