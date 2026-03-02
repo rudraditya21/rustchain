@@ -1,0 +1,20 @@
+[node]
+id = "node-1"
+chain_id = "rustchain-local"
+
+[network]
+listen_addr = "127.0.0.1:6000"
+peers = []
+
+[rpc]
+listen_addr = "127.0.0.1:7000"
+
+[storage]
+path = "./data"
+
+[mining]
+difficulty_bits = 18
+max_transactions_per_block = 1000
+
+[logging]
+level = "info"
