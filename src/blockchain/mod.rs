@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChainState {
-    pub height: u64,
-}
+pub mod chain;
+pub mod error;
+pub mod mempool;
+pub mod state;
+pub mod validator;

@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::core::error::CoreError;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Hash32(pub [u8; 32]);
 
 impl Hash32 {

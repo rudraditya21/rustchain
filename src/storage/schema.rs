@@ -28,6 +28,7 @@ pub struct TipState {
 pub struct AccountSnapshot {
     pub balance: u64,
     pub nonce: u64,
+    pub public_key_hex: Option<String>,
 }
 
 pub fn key_block_by_hash(hash: &Hash32) -> Vec<u8> {
