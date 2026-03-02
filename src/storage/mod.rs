@@ -1,4 +1,5 @@
 #![allow(dead_code)]
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoreHandle;
+pub mod error;
+pub mod schema;
+pub mod sled_store;
