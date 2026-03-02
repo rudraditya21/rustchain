@@ -10,8 +10,8 @@ use crate::core::transaction::Transaction;
 use crate::storage::error::StorageError;
 use crate::storage::schema::{
     key_account_snapshot, key_block_by_hash, key_height_to_hash, key_mempool, key_tip,
-    prefix_mempool, AccountSnapshot, TipState, NS_ACCOUNT_SNAPSHOT, NS_BLOCK_BY_HASH,
-    NS_HEIGHT_TO_HASH, NS_MEMPOOL, NS_TIP, STORAGE_TREE_NAME,
+    prefix_height_to_hash, prefix_mempool, AccountSnapshot, TipState, NS_ACCOUNT_SNAPSHOT,
+    NS_BLOCK_BY_HASH, NS_HEIGHT_TO_HASH, NS_MEMPOOL, NS_TIP, STORAGE_TREE_NAME,
 };
 
 pub struct SledStore {
@@ -47,6 +47,44 @@ impl SledStore {
         self.state.apply_batch(batch)?;
 
         Ok(block_hash)
+    }
+
+    pub fn replace_canonical_chain(&self, blocks: &[Block]) -> Result<(), StorageError> {
+        if blocks.is_empty() {
+            return Err(StorageError::Serialization(
+                "canonical chain cannot be empty".to_string(),
+            ));
+        }
+
+        let mut batch = sled::Batch::default();
+
+        for item in self.state.scan_prefix(prefix_height_to_hash()) {
+            let (key, _) = item?;
+            batch.remove(key);
+        }
+
+        for (height, block) in blocks.iter().enumerate() {
+            let block_hash = block.hash();
+            let block_key = key_block_by_hash(&block_hash);
+            let block_value = serialize_json(block)?;
+            let height_key = key_height_to_hash(height as u64);
+            batch.insert(block_key, block_value);
+            batch.insert(height_key, block_hash.0.to_vec());
+        }
+
+        let tip_height = (blocks.len() - 1) as u64;
+        let tip_hash = blocks
+            .last()
+            .map(Block::hash)
+            .ok_or_else(|| StorageError::Serialization("missing tip block".to_string()))?;
+        let tip_value = serialize_json(&TipState {
+            height: tip_height,
+            block_hash: tip_hash,
+        })?;
+        batch.insert(key_tip(), tip_value);
+
+        self.state.apply_batch(batch)?;
+        Ok(())
     }
 
     pub fn get_block(&self, hash: &Hash32) -> Result<Option<Block>, StorageError> {

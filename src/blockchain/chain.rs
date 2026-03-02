@@ -4,6 +4,9 @@ use std::path::Path;
 
 use crate::blockchain::error::BlockchainError;
 use crate::blockchain::mempool::Mempool;
+use crate::blockchain::reorg::{
+    common_ancestor_height, cumulative_work, ForkRecord, ForkStatus, ForkTracker, ReorgDecision,
+};
 use crate::blockchain::state::{genesis_ledger, GenesisAccount, LedgerState};
 use crate::blockchain::validator::{
     validate_and_apply_block_transactions, validate_block_header, validate_candidate_transactions,
@@ -47,6 +50,7 @@ pub struct Blockchain {
     chain: Vec<ChainEntry>,
     ledger: LedgerState,
     mempool: Mempool,
+    fork_tracker: ForkTracker,
 }
 
 impl Blockchain {
@@ -64,6 +68,7 @@ impl Blockchain {
             chain: Vec::new(),
             ledger: LedgerState::new(),
             mempool: Mempool::new(),
+            fork_tracker: ForkTracker::new(),
         };
 
         chain.bootstrap()?;
@@ -90,6 +95,22 @@ impl Blockchain {
         self.ledger
             .get(address)
             .map_or(0, |account| account.balance)
+    }
+
+    pub fn get_nonce(&self, address: &str) -> u64 {
+        self.ledger.get(address).map_or(0, |account| account.nonce)
+    }
+
+    pub fn cumulative_work(&self) -> u128 {
+        cumulative_work(&self.blocks())
+    }
+
+    pub fn tracked_forks_count(&self) -> usize {
+        self.fork_tracker.count()
+    }
+
+    pub fn tracked_fork(&self, tip_hash: &Hash32) -> Option<ForkRecord> {
+        self.fork_tracker.get(tip_hash).cloned()
     }
 
     pub fn admit_transaction(&mut self, tx: Transaction) -> Result<Hash32, BlockchainError> {
@@ -188,6 +209,60 @@ impl Blockchain {
         let blocks = self.blocks();
         validate_chain(&blocks, &self.genesis_accounts, self.config.difficulty_bits)?;
         Ok(())
+    }
+
+    pub fn consider_fork(
+        &mut self,
+        candidate_blocks: Vec<Block>,
+    ) -> Result<ReorgDecision, BlockchainError> {
+        if candidate_blocks.is_empty() {
+            return Err(BlockchainError::EmptyChain);
+        }
+
+        let canonical_blocks = self.blocks();
+        let common_height = common_ancestor_height(&canonical_blocks, &candidate_blocks)
+            .ok_or(BlockchainError::NoCommonAncestor)?;
+
+        let candidate_tip = candidate_blocks
+            .last()
+            .map(Block::hash)
+            .ok_or(BlockchainError::EmptyChain)?;
+        let candidate_height = (candidate_blocks.len() - 1) as u64;
+        let candidate_ledger = validate_chain(
+            &candidate_blocks,
+            &self.genesis_accounts,
+            self.config.difficulty_bits,
+        )?;
+        let candidate_work = cumulative_work(&candidate_blocks);
+        let canonical_work = cumulative_work(&canonical_blocks);
+
+        if candidate_work <= canonical_work {
+            self.fork_tracker.record(ForkRecord {
+                tip_hash: candidate_tip,
+                height: candidate_height,
+                cumulative_work: candidate_work,
+                common_height,
+                status: ForkStatus::RejectedAsLighter,
+            });
+            return Ok(ReorgDecision::KeepCanonical);
+        }
+
+        self.store.replace_canonical_chain(&candidate_blocks)?;
+        self.persist_ledger_snapshots(&candidate_ledger)?;
+
+        self.chain = chain_entries_from_blocks(&candidate_blocks);
+        self.ledger = candidate_ledger;
+        self.reload_mempool()?;
+
+        self.fork_tracker.record(ForkRecord {
+            tip_hash: candidate_tip,
+            height: candidate_height,
+            cumulative_work: candidate_work,
+            common_height,
+            status: ForkStatus::AdoptedAsCanonical,
+        });
+
+        Ok(ReorgDecision::AdoptFork)
     }
 
     fn bootstrap(&mut self) -> Result<(), BlockchainError> {
@@ -299,6 +374,18 @@ impl Blockchain {
     }
 }
 
+fn chain_entries_from_blocks(blocks: &[Block]) -> Vec<ChainEntry> {
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(height, block)| ChainEntry {
+            height: height as u64,
+            hash: block.hash(),
+            block: block.clone(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -307,6 +394,7 @@ mod tests {
 
     use crate::blockchain::chain::{Blockchain, ChainConfig};
     use crate::blockchain::error::BlockchainError;
+    use crate::blockchain::reorg::{ForkStatus, ReorgDecision};
     use crate::blockchain::state::GenesisAccount;
     use crate::blockchain::validator::validate_chain;
     use crate::core::block::Block;
@@ -353,6 +441,20 @@ mod tests {
             max_transactions_per_block: 1_000,
             genesis_timestamp_unix: 1_700_000_000,
         }
+    }
+
+    fn mine_transfer(
+        chain: &mut Blockchain,
+        from: &Wallet,
+        to: &Wallet,
+        amount: u64,
+        nonce: u64,
+        timestamp: u64,
+    ) -> Result<(), BlockchainError> {
+        let tx = signed_tx(from, to.address(), amount, 1, nonce);
+        chain.admit_transaction(tx)?;
+        chain.mine_next_block(timestamp, 0)?;
+        Ok(())
     }
 
     #[test]
@@ -481,6 +583,106 @@ mod tests {
         let receiver = wallet_b.address();
         assert_eq!(ledger.get(&sender).map_or(0, |a| a.nonce), 3);
         assert_eq!(ledger.get(&receiver).map_or(0, |a| a.balance), 1_009);
+        Ok(())
+    }
+
+    #[test]
+    fn shorter_fork_is_rejected() -> Result<(), BlockchainError> {
+        let (wallet_a, wallet_b, genesis) = wallets_and_genesis();
+        let dir_main = tempdir()?;
+        let dir_fork = tempdir()?;
+        let config = chain_config(0);
+
+        let mut main = Blockchain::open_or_init(dir_main.path(), config, genesis.clone())?;
+        mine_transfer(&mut main, &wallet_a, &wallet_b, 5, 1, 1_700_001_001)?;
+        mine_transfer(&mut main, &wallet_a, &wallet_b, 5, 2, 1_700_001_002)?;
+        mine_transfer(&mut main, &wallet_a, &wallet_b, 5, 3, 1_700_001_003)?;
+
+        let mut fork = Blockchain::open_or_init(dir_fork.path(), config, genesis)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 7, 1, 1_700_001_011)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 7, 2, 1_700_001_012)?;
+
+        let fork_tip = fork.tip_hash();
+        let original_tip = main.tip_hash();
+        let decision = main.consider_fork(fork.blocks())?;
+
+        assert_eq!(decision, ReorgDecision::KeepCanonical);
+        assert_eq!(main.tip_hash(), original_tip);
+        assert_eq!(main.tracked_forks_count(), 1);
+        let record = main.tracked_fork(&fork_tip).ok_or_else(|| {
+            BlockchainError::Serialization("missing tracked fork record".to_string())
+        })?;
+        assert_eq!(record.status, ForkStatus::RejectedAsLighter);
+        Ok(())
+    }
+
+    #[test]
+    fn heavier_fork_is_accepted() -> Result<(), BlockchainError> {
+        let (wallet_a, wallet_b, genesis) = wallets_and_genesis();
+        let dir_main = tempdir()?;
+        let dir_fork = tempdir()?;
+        let config = chain_config(0);
+
+        let mut main = Blockchain::open_or_init(dir_main.path(), config, genesis.clone())?;
+        mine_transfer(&mut main, &wallet_a, &wallet_b, 5, 1, 1_700_002_001)?;
+        mine_transfer(&mut main, &wallet_a, &wallet_b, 6, 2, 1_700_002_002)?;
+
+        let mut fork = Blockchain::open_or_init(dir_fork.path(), config, genesis)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 3, 1, 1_700_002_011)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 4, 2, 1_700_002_012)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 5, 3, 1_700_002_013)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 6, 4, 1_700_002_014)?;
+
+        let fork_tip = fork.tip_hash();
+        let decision = main.consider_fork(fork.blocks())?;
+
+        assert_eq!(decision, ReorgDecision::AdoptFork);
+        assert_eq!(main.tip_hash(), fork_tip);
+        assert_eq!(main.chain_height(), 4);
+        let record = main.tracked_fork(&fork_tip).ok_or_else(|| {
+            BlockchainError::Serialization("missing tracked fork record".to_string())
+        })?;
+        assert_eq!(record.status, ForkStatus::AdoptedAsCanonical);
+        Ok(())
+    }
+
+    #[test]
+    fn balances_and_nonces_stay_consistent_after_reorg() -> Result<(), BlockchainError> {
+        let (wallet_a, wallet_b, genesis) = wallets_and_genesis();
+        let dir_main = tempdir()?;
+        let dir_fork = tempdir()?;
+        let config = chain_config(0);
+        let sender = wallet_a.address();
+        let receiver = wallet_b.address();
+
+        let mut main = Blockchain::open_or_init(dir_main.path(), config, genesis.clone())?;
+        mine_transfer(&mut main, &wallet_a, &wallet_b, 9, 1, 1_700_003_001)?;
+        mine_transfer(&mut main, &wallet_a, &wallet_b, 9, 2, 1_700_003_002)?;
+
+        let mut fork = Blockchain::open_or_init(dir_fork.path(), config, genesis.clone())?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 3, 1, 1_700_003_011)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 4, 2, 1_700_003_012)?;
+        mine_transfer(&mut fork, &wallet_a, &wallet_b, 5, 3, 1_700_003_013)?;
+
+        let expected_sender_balance = fork.get_balance(&sender);
+        let expected_sender_nonce = fork.get_nonce(&sender);
+        let expected_receiver_balance = fork.get_balance(&receiver);
+        let expected_receiver_nonce = fork.get_nonce(&receiver);
+
+        let decision = main.consider_fork(fork.blocks())?;
+        assert_eq!(decision, ReorgDecision::AdoptFork);
+
+        assert_eq!(main.get_balance(&sender), expected_sender_balance);
+        assert_eq!(main.get_nonce(&sender), expected_sender_nonce);
+        assert_eq!(main.get_balance(&receiver), expected_receiver_balance);
+        assert_eq!(main.get_nonce(&receiver), expected_receiver_nonce);
+        main.validate_full_chain()?;
+
+        drop(main);
+        let reopened = Blockchain::open_or_init(dir_main.path(), config, genesis)?;
+        reopened.validate_full_chain()?;
+        assert_eq!(reopened.get_balance(&sender), expected_sender_balance);
+        assert_eq!(reopened.get_nonce(&sender), expected_sender_nonce);
         Ok(())
     }
 

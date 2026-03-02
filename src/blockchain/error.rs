@@ -83,4 +83,7 @@ pub enum BlockchainError {
 
     #[error("serialization error: {0}")]
     Serialization(String),
+
+    #[error("candidate fork does not share genesis with canonical chain")]
+    NoCommonAncestor,
 }

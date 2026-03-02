@@ -66,3 +66,7 @@ pub fn key_account_snapshot(address: &str) -> Vec<u8> {
 pub fn prefix_mempool() -> &'static [u8] {
     KEY_MEMPOOL_PREFIX
 }
+
+pub fn prefix_height_to_hash() -> &'static [u8] {
+    KEY_HEIGHT_TO_HASH_PREFIX
+}
